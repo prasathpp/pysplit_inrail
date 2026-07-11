@@ -526,7 +526,7 @@ with tab2:
             placeholder="Pick a suggestion, or type e.g. MYS and press Enter",
         )
     with col3: d_date = st.date_input("Journey Date", value=tomorrow, key="d_date")
-    with col4: d_quota = st.selectbox("Quota", ["GN", "TQ", "PT", "LD", "SS", "HP", "DF"], index=0, key="d_quota")
+    with col4: d_quota = st.selectbox("Quota", ["GN", "TQ", "PT", "LD", "SS", "HP", "DF", "FT", "YU", "DP", "PH"], index=0, key="d_quota")
 
     submit_direct = st.button("Search Direct Trains", type="primary", key="d_submit")
 
