@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pysplit_inrail"
-version = "1.0.0"
+version = "1.0.1"
 description = "Indian Railways split journey search tool - find booking opportunities by intelligently splitting long journeys into segments"
 readme = "README.md"
 requires-python = ">=3.8"
