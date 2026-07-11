@@ -1,6 +1,6 @@
 import unittest
 
-from pyinrail.formatters import (
+from pysplit_inrail.formatters import (
     format_schedule_info,
     format_split_journey_results,
     format_train_info,

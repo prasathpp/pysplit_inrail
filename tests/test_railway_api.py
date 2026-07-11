@@ -2,7 +2,7 @@ import unittest
 
 import requests
 
-from pyinrail.railway_api import (
+from pysplit_inrail.railway_api import (
     RailwayApiError,
     extract_schedule_from_html,
     get_schedule_from_page,

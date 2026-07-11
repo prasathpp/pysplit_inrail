@@ -3,7 +3,7 @@
 from setuptools import setup, find_packages
 
 setup(
-    name="pyinrail",
+    name="pysplit_inrail",
     version="1.0.0",
     author="PyInRail Contributors",
     author_email="your-email@example.com",

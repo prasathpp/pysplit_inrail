@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pyinrail.stations import StationCacheError, load_station_cache, search_station_local
+from pysplit_inrail.stations import StationCacheError, load_station_cache, search_station_local
 
 
 class StationTests(unittest.TestCase):

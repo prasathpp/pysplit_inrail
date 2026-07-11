@@ -3,7 +3,7 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pyinrail"
+name = "pysplit_inrail"
 version = "1.0.0"
 description = "Indian Railways split journey search tool - find booking opportunities by intelligently splitting long journeys into segments"
 readme = "README.md"
@@ -59,7 +59,7 @@ Repository = "https://github.com/prasathpp/pyinrail-master.git"
 Issues = "https://github.com/prasathpp/pyinrail-master"
 
 [tool.setuptools]
-packages = ["pyinrail"]
+packages = ["pysplit_inrail"]
 
 [tool.black]
 line-length = 100

@@ -114,3 +114,4 @@ dmypy.json
 
 FINAL_SUMMARY.txt
 PYPI_UPLOAD_GUIDE.md
+.pypirc

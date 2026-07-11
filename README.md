@@ -17,7 +17,7 @@ The project includes both a **command-line interface (CLI)** and an interactive 
 
 ```
 pyinrail-master/
-├── pyinrail/                   # Core package (library modules)
+├── pysplit_inrail/                   # Core package (library modules)
 │   ├── __init__.py
 │   ├── railway_api.py          # API wrapper for RailYatri and Ixigo
 │   ├── split_journey.py        # Split journey algorithm (main feature)
@@ -50,8 +50,8 @@ pyinrail-master/
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/yourusername/pyinrail.git
-   cd pyinrail
+   git clone https://github.com/yourusername/pysplit_inrail.git
+   cd pysplit_inrail
    ```
 
 2. **Create a virtual environment** (recommended)
@@ -66,6 +66,11 @@ pyinrail-master/
 3. **Install dependencies**
    ```bash
    pip install -r requirements.txt
+   ```
+
+4. **Or install the published PyPI package**
+   ```bash
+   pip install pysplit_inrail
    ```
 
 ### Usage
@@ -101,8 +106,8 @@ python rail_scrapper.py split --train 16021 --from MAS --to MYS --date 31-07-202
 #### Option 3: Use as a Python Library
 
 ```python
-from pyinrail.railway_api import get_trains_between_stations, create_session
-from pyinrail.split_journey import find_same_train_split_journeys
+from pysplit_inrail.railway_api import get_trains_between_stations, create_session
+from pysplit_inrail.split_journey import find_same_train_split_journeys
 
 # Create a session with retry logic
 session = create_session(retries=2)
