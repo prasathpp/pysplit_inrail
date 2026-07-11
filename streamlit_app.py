@@ -1,1114 +1,667 @@
-from __future__ import annotations
-
+import time
 import json
-import re
-import sys
-from datetime import date, datetime
-from pathlib import Path
-from typing import Any, Mapping, Sequence
-
-
-def _running_in_streamlit() -> bool:
-    try:
-        from streamlit.runtime import exists
-        return exists()
-    except Exception:
-        return False
-
-
-def _launch_with_streamlit_if_needed() -> None:
-    if __name__ != "__main__" or _running_in_streamlit():
-        return
-
-    import subprocess
-
-    cmd = [
-        sys.executable,
-        "-m",
-        "streamlit",
-        "run",
-        str(Path(__file__).resolve()),
-    ]
-    cmd.extend(sys.argv[1:])
-    raise SystemExit(subprocess.call(cmd))
-
-
-_launch_with_streamlit_if_needed()
-
-import pandas as pd
+import os
 import streamlit as st
-
-from rail_scrapper import (
-    DEFAULT_CACHE_FILE,
-    DEFAULT_FROM_STATION,
-    DEFAULT_JOURNEY_DATE,
-    DEFAULT_QUOTA,
-    DEFAULT_RETRIES,
-    DEFAULT_SCHEDULE_TRAIN,
-    DEFAULT_SPLIT_ACCEPT_RAC,
-    DEFAULT_SPLIT_CLASSES,
-    DEFAULT_SPLIT_MAX_RESULTS,
-    DEFAULT_SPLIT_MAX_SEGMENTS,
-    DEFAULT_SPLIT_MAX_WL,
-    DEFAULT_SPLIT_SEARCH_DEEPER,
-    DEFAULT_SPLIT_TRAIN,
-    DEFAULT_STATION_LIMIT,
-    DEFAULT_STATION_QUERY,
-    DEFAULT_TIMEOUT,
-    DEFAULT_TO_STATION,
-    DEFAULT_TRAIN_PROVIDER,
-)
-from pysplit_inrail.railway_api import (
-    RailwayApiError,
-    SUPPORTED_TRAIN_SEARCH_PROVIDERS,
-    create_session,
-    get_schedule_from_page,
-    get_trains_between_stations,
-)
-from pysplit_inrail.split_journey import (
-    SplitJourneyError,
-    extract_route_stops,
-    find_route_slice,
-    find_same_train_split_journeys,
-    parse_availability_status,
-    parse_class_list,
-)
-from pysplit_inrail.stations import StationCacheError, load_station_cache, search_station_local
-
-
-APP_TITLE = "Rail Split Journey"
-CLASS_OPTIONS = ["SL", "3A", "2A", "1A", "3E", "CC", "EC", "2S", "FC", "EA"]
-QUOTA_LABELS = {
-    "GN": "General",
-    "TQ": "Tatkal",
-    "PT": "Premium Tatkal",
-    "LD": "Ladies",
-    "SS": "Lower Berth",
-    "HP": "Physically Handicapped",
-    "DF": "Defence",
-}
-QUOTA_OPTIONS = list(QUOTA_LABELS)
-MAX_SEGMENT_LIMIT = 8
-MAX_RESULTS_LIMIT = 100
-SCHEDULE_CACHE_TTL_SECONDS = 6 * 60 * 60
-
-
-st.set_page_config(
-    page_title=APP_TITLE,
-    page_icon="🚄",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-
-def main() -> None:
-    inject_css()
-    initialize_session_state()
-
-    settings = render_sidebar()
-    
-    st.title("🚄 Rail Split Journey Pro")
-    st.markdown("Optimize your railway bookings by finding intelligent split tickets and hidden availabilities.")
-    st.write("")
-
-    tabs = st.tabs(["🛤️ Split Journey", "🚆 Direct Trains", "📅 Schedule", "🚉 Stations"])
-
-    with tabs[0]:
-        render_split_tab(settings)
-    with tabs[1]:
-        render_direct_trains_tab(settings)
-    with tabs[2]:
-        render_schedule_tab(settings)
-    with tabs[3]:
-        render_station_tab(settings)
-
-
-def initialize_session_state() -> None:
-    defaults = {
-        "split_result": None,
-        "split_route_rows": [],
-        "split_params": None,
-        "direct_train_result": None,
-        "direct_train_params": None,
-        "schedule_result": None,
-        "schedule_params": None,
-        "station_result": None,
-        "station_params": None,
-    }
-    for key, value in defaults.items():
-        st.session_state.setdefault(key, value)
-
-
-def render_sidebar() -> dict[str, Any]:
-    with st.sidebar:
-        st.header("⚙️ Preferences")
-        
-        provider = st.selectbox(
-            "Search Provider",
-            options=list(SUPPORTED_TRAIN_SEARCH_PROVIDERS),
-            index=safe_index(SUPPORTED_TRAIN_SEARCH_PROVIDERS, DEFAULT_TRAIN_PROVIDER),
-            format_func=lambda value: value.title(),
-            help="Select the backend API to query for trains."
-        )
-        quota = st.selectbox(
-            "Booking Quota",
-            options=QUOTA_OPTIONS,
-            index=safe_index(QUOTA_OPTIONS, DEFAULT_QUOTA),
-            format_func=lambda code: f"{code} - {QUOTA_LABELS.get(code, code)}",
-        )
-
-        st.markdown("---")
-        with st.expander("🔧 Network & System", expanded=False):
-            cols = st.columns(2)
-            timeout = int(
-                cols[0].number_input(
-                    "Timeout (s)",
-                    min_value=5,
-                    max_value=120,
-                    value=int(DEFAULT_TIMEOUT),
-                    step=5,
-                )
-            )
-            retries = int(
-                cols[1].number_input(
-                    "Retries",
-                    min_value=0,
-                    max_value=5,
-                    value=int(DEFAULT_RETRIES),
-                )
-            )
-
-            cache_path = st.text_input("Station Cache Path", value=str(DEFAULT_CACHE_FILE))
-            show_raw = st.toggle("Show Raw JSON Outputs", value=False)
-            
-            try:
-                station_count = len(load_station_cache_cached(cache_path))
-                st.caption(f"✅ {station_count:,} stations loaded")
-            except StationCacheError as exc:
-                st.caption(f"❌ Error: {str(exc)}")
-
-    return {
-        "provider": provider,
-        "quota": quota,
-        "timeout": timeout,
-        "retries": retries,
-        "cache_path": cache_path,
-        "show_raw": show_raw,
-    }
-
-
-def render_split_tab(settings: Mapping[str, Any]) -> None:
-    # Custom CSS injected inside the tab to vertically align toggles with number inputs
-    st.markdown(
-        """
-        <style>
-        /* Target the specific controls row and align items vertically to the bottom/center */
-        div[data-testid="stForm"] div[data-testid="stHorizontalBlock"]:has(div[data-testid="stMarkdownContainer"]) {
-            align-items: flex-end;
-        }
-        /* Alternative robust targeting for the container layout */
-        div.element-container:has(div.stToggle) {
-            margin-bottom: 10px; /* Adjusts the alignment to sit evenly with the number input fields */
-        }
-        </style>
-        """,
-        unsafe_allow_html=True
-    )
-
-    with st.form("split_form", clear_on_submit=False):
-        st.subheader("Journey Details")
-        route_cols = st.columns([1.2, 1, 1, 1.5])
-        
-        train_number = route_cols[0].text_input(
-            "Train Number",
-            value=DEFAULT_SPLIT_TRAIN,
-            max_chars=8,
-            placeholder="e.g. 16021"
-        )
-        from_station = route_cols[1].text_input(
-            "From (Code)",
-            value=DEFAULT_FROM_STATION,
-            max_chars=6,
-            placeholder="MAS"
-        )
-        to_station = route_cols[2].text_input(
-            "To (Code)",
-            value=DEFAULT_TO_STATION,
-            max_chars=6,
-            placeholder="MYS"
-        )
-        journey_day = route_cols[3].date_input(
-            "Journey Date",
-            value=parse_default_date(DEFAULT_JOURNEY_DATE),
-            format="DD-MM-YYYY",
-        )
-
-        selected_classes = st.multiselect(
-            "Class Priority (in order of preference)",
-            options=CLASS_OPTIONS,
-            default=default_classes(DEFAULT_SPLIT_CLASSES),
-        )
-
-        # Advanced search controls shown inline
-        controls = st.columns([1, 1, 1, 1.5, 1.5])
-        max_segments = int(
-            controls[0].number_input(
-                "Max Segments",
-                min_value=2,
-                max_value=MAX_SEGMENT_LIMIT,
-                value=int(DEFAULT_SPLIT_MAX_SEGMENTS),
-            )
-        )
-        max_wl = int(
-            controls[1].number_input(
-                "Max WL limit",
-                min_value=0,
-                max_value=500,
-                value=int(DEFAULT_SPLIT_MAX_WL),
-            )
-        )
-        max_results = int(
-            controls[2].number_input(
-                "Max Results",
-                min_value=1,
-                max_value=MAX_RESULTS_LIMIT,
-                value=int(DEFAULT_SPLIT_MAX_RESULTS),
-            )
-        )
-
-        toggle_controls = st.columns([1.5, 1.5, 1, 1, 1])
-        # Removed the manual <br> spacer completely so they don't get pushed down
-        accept_rac = toggle_controls[0].toggle("Accept RAC as Available", value=DEFAULT_SPLIT_ACCEPT_RAC)
-        search_deeper = toggle_controls[1].toggle("Search Deeper Configurations", value=DEFAULT_SPLIT_SEARCH_DEEPER)
-
-        st.markdown("<br>", unsafe_allow_html=True)
-        col1, col2, col3 = st.columns([1, 2, 1])
-        submitted = col2.form_submit_button("🔍 Find Optimal Split Options", type="primary", width='stretch')
-
-    if submitted:
-        run_split_search(
-            train_number=train_number,
-            from_station=from_station,
-            to_station=to_station,
-            journey_day=journey_day,
-            selected_classes=selected_classes,
-            max_segments=max_segments,
-            max_wl=max_wl,
-            max_results=max_results,
-            accept_rac=accept_rac,
-            search_deeper=search_deeper,
-            settings=settings,
-        )
-
-    st.divider()
-    split_result = st.session_state.get("split_result")
-    if split_result:
-        render_split_results(
-            split_result,
-            st.session_state.get("split_route_rows") or [],
-            st.session_state.get("split_params") or {},
-            show_raw=bool(settings["show_raw"]),
-        )
-    else:
-        st.info("👋 Enter your journey details above and hit search to find split tickets.")
-
-
-def run_split_search(
-    *,
-    train_number: str,
-    from_station: str,
-    to_station: str,
-    journey_day: date,
-    selected_classes: Sequence[str],
-    max_segments: int,
-    max_wl: int,
-    max_results: int,
-    accept_rac: bool,
-    search_deeper: bool,
-    settings: Mapping[str, Any],
-) -> None:
-    try:
-        normalized_train = validate_train_number(train_number)
-        normalized_from, normalized_to = validate_route(from_station, to_station)
-        journey_date = date_to_api(journey_day)
-        class_codes = normalize_classes(selected_classes)
-
-        session = create_session(retries=int(settings["retries"]))
-        with st.status("Analyzing route and checking availability...", expanded=True) as status:
-            st.write(f"📥 Loading timetable for train {normalized_train}...")
-            schedule_data = fetch_schedule_cached(
-                normalized_train,
-                int(settings["timeout"]),
-                int(settings["retries"]),
-            )
-            route_rows = route_rows_for_schedule(schedule_data, normalized_from, normalized_to)
-
-            st.write("🔄 Checking segment availability and permutations...")
-            split_data = find_same_train_split_journeys(
-                train_number=normalized_train,
-                from_station=normalized_from,
-                to_station=normalized_to,
-                journey_date=journey_date,
-                quota=str(settings["quota"]),
-                provider=str(settings["provider"]),
-                classes=",".join(class_codes) if class_codes else None,
-                max_segments=max_segments,
-                max_wl=max_wl,
-                accept_rac=accept_rac,
-                max_results=max_results,
-                search_deeper=search_deeper,
-                session=session,
-                timeout=float(settings["timeout"]),
-                schedule_data=schedule_data,
-            )
-            status.update(label="✅ Split search completed successfully", state="complete")
-
-        st.session_state["split_result"] = split_data
-        st.session_state["split_route_rows"] = route_rows
-        st.session_state["split_params"] = {
-            "train": normalized_train,
-            "from": normalized_from,
-            "to": normalized_to,
-            "date": journey_date,
-            "classes": class_codes or ["All returned classes"],
-            "quota": settings["quota"],
-            "provider": settings["provider"],
-            "searched_at": now_label(),
-        }
-    except (RailwayApiError, SplitJourneyError, ValueError) as exc:
-        st.error(f"Error: {str(exc)}")
-
-
-def render_split_results(
-    split_data: Mapping[str, Any],
-    route_rows: Sequence[Mapping[str, Any]],
-    params: Mapping[str, Any],
-    *,
-    show_raw: bool,
-) -> None:
-    results = split_data.get("results", [])
-    
-    st.subheader("📊 Search Summary")
-    metric_cols = st.columns(5)
-    metric_cols[0].metric("Valid Options", len(results))
-    metric_cols[1].metric("Route Stops", split_data.get("route_stop_count", 0))
-    metric_cols[2].metric("Combinations Tested", split_data.get("checked_combinations", 0))
-    metric_cols[3].metric("API Lookups", split_data.get("checked_segments", 0))
-    metric_cols[4].metric("Max Waitlist allowed", split_data.get("max_wl", "N/A"))
-
-    render_search_caption(params)
-
-    if route_rows:
-        with st.expander("🗺️ View Scheduled Route Traversed", expanded=False):
-            st.dataframe(pd.DataFrame(route_rows), width='stretch', hide_index=True)
-
-    if not results:
-        st.warning("⚠️ No acceptable same-train split routes found with the current rules. Try increasing the Max WL or searching deeper.")
-        if show_raw:
-            st.json(split_data)
-        return
-
-    summary_df = split_summary_frame(results)
-    segment_df = split_segment_frame(results)
-
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.subheader("🏆 Best Split Options Available")
-    st.dataframe(summary_df, width='stretch', hide_index=True)
-    
-    render_downloads(
-        base_name=f"split_{params.get('train', 'train')}_{params.get('from', 'from')}_{params.get('to', 'to')}",
-        payload=split_data,
-        frames={"Summary": summary_df, "Segments": segment_df},
-    )
-
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.subheader("🧩 Detailed Segments")
-    for index, result in enumerate(results, start=1):
-        label = split_result_label(index, result)
-        with st.expander(label, expanded=(index == 1)):
-            rows = segment_rows(result.get("segments", []))
-            st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
-
-    if show_raw:
-        st.markdown("---")
-        st.subheader("Raw JSON Response")
-        st.json(split_data)
-
-
-def render_direct_trains_tab(settings: Mapping[str, Any]) -> None:
-    with st.form("direct_trains_form", clear_on_submit=False):
-        st.subheader("Search Direct Trains")
-        cols = st.columns([1, 1, 1, 1.5])
-        from_station = cols[0].text_input("From Station", value=DEFAULT_FROM_STATION, key="direct_from")
-        to_station = cols[1].text_input("To Station", value=DEFAULT_TO_STATION, key="direct_to")
-        journey_day = cols[2].date_input(
-            "Journey Date",
-            value=parse_default_date(DEFAULT_JOURNEY_DATE),
-            format="DD-MM-YYYY",
-            key="direct_date",
-        )
-        class_filter = cols[3].multiselect("Filter by Classes (Optional)", options=CLASS_OPTIONS, default=[])
-        
-        st.markdown("<br>", unsafe_allow_html=True)
-        col1, col2, col3 = st.columns([1, 2, 1])
-        submitted = col2.form_submit_button("🚆 Check Direct Availability", type="primary", width='stretch')
-
-    if submitted:
-        try:
-            normalized_from, normalized_to = validate_route(from_station, to_station)
-            journey_date = date_to_api(journey_day)
-            session = create_session(retries=int(settings["retries"]))
-            with st.spinner("Fetching direct train availabilities..."):
-                train_data = get_trains_between_stations(
-                    normalized_from,
-                    normalized_to,
-                    journey_date,
-                    quota=str(settings["quota"]),
-                    provider=str(settings["provider"]),
-                    session=session,
-                    timeout=float(settings["timeout"]),
-                    use_fetch_availability=True,
-                )
-
-            st.session_state["direct_train_result"] = train_data
-            st.session_state["direct_train_params"] = {
-                "from": normalized_from,
-                "to": normalized_to,
-                "date": journey_date,
-                "classes": normalize_classes(class_filter),
-                "quota": settings["quota"],
-                "provider": settings["provider"],
-                "searched_at": now_label(),
-            }
-        except (RailwayApiError, ValueError) as exc:
-            st.error(f"Error: {str(exc)}")
-
-    st.divider()
-    train_data = st.session_state.get("direct_train_result")
-    params = st.session_state.get("direct_train_params") or {}
-    if train_data:
-        render_direct_train_results(train_data, params, show_raw=bool(settings["show_raw"]))
-    else:
-        st.info("👋 Enter your source and destination to view direct trains.")
-
-
-def render_direct_train_results(
-    train_data: Mapping[str, Any],
-    params: Mapping[str, Any],
-    *,
-    show_raw: bool,
-) -> None:
-    if not train_data.get("success"):
-        st.error(train_data.get("message") or train_data.get("error") or "Could not fetch trains.")
-        if show_raw:
-            st.json(train_data)
-        return
-
-    rows = direct_train_rows(
-        train_data.get("train_between_stations", []),
-        class_filter=params.get("classes") or [],
-    )
-    
-    if not rows:
-        st.warning("⚠️ No direct trains found matching your criteria.")
-        if show_raw:
-            st.json(train_data)
-        return
-
-    direct_df = pd.DataFrame(rows)
-    
-    st.subheader("📊 Direct Availability Summary")
-    metric_cols = st.columns(4)
-    metric_cols[0].metric("Unique Trains", direct_df["Number"].nunique())
-    metric_cols[1].metric("Total Class Options", len(direct_df))
-    metric_cols[2].metric("Available Seats", int((direct_df["Kind"] == "available").sum()))
-    metric_cols[3].metric("RAC/WL Tickets", int(direct_df["Kind"].isin(["rac", "wl"]).sum()))
-
-    render_search_caption(params)
-    
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.dataframe(direct_df, width='stretch', hide_index=True)
-    
-    render_downloads(
-        base_name=f"direct_{params.get('from', 'from')}_{params.get('to', 'to')}",
-        payload=train_data,
-        frames={"Direct Trains": direct_df},
-    )
-
-    if show_raw:
-        st.markdown("---")
-        st.subheader("Raw JSON Response")
-        st.json(train_data)
-
-
-def render_schedule_tab(settings: Mapping[str, Any]) -> None:
-    with st.form("schedule_form", clear_on_submit=False):
-        st.subheader("View Train Schedule")
-        cols = st.columns([2, 1, 1])
-        train_number = cols[0].text_input("Train Number", value=DEFAULT_SCHEDULE_TRAIN, max_chars=8)
-        
-        st.markdown("<br>", unsafe_allow_html=True)
-        submitted = st.form_submit_button("📅 Fetch Schedule", type="primary")
-
-    if submitted:
-        try:
-            normalized_train = validate_train_number(train_number)
-            with st.spinner("Fetching full schedule..."):
-                schedule_data = fetch_schedule_cached(
-                    normalized_train,
-                    int(settings["timeout"]),
-                    int(settings["retries"]),
-                )
-            st.session_state["schedule_result"] = schedule_data
-            st.session_state["schedule_params"] = {
-                "train": normalized_train,
-                "searched_at": now_label(),
-            }
-        except (RailwayApiError, ValueError) as exc:
-            st.error(f"Error: {str(exc)}")
-
-    st.divider()
-    schedule_data = st.session_state.get("schedule_result")
-    params = st.session_state.get("schedule_params") or {}
-    if schedule_data:
-        render_schedule_results(schedule_data, params, show_raw=bool(settings["show_raw"]))
-    else:
-        st.info("👋 Enter a train number to view its full schedule.")
-
-
-def render_schedule_results(
-    schedule_data: Mapping[str, Any],
-    params: Mapping[str, Any],
-    *,
-    show_raw: bool,
-) -> None:
-    rows = schedule_rows(schedule_data)
-    title = f"{schedule_data.get('train_name', 'N/A')} ({schedule_data.get('train_number', 'N/A')})"
-    st.subheader(f"🚂 {title}")
-
-    run_days = " ".join(str(day) for day in schedule_data.get("run_days", []) if day)
-    caption_parts = [part for part in [run_days, params.get("searched_at")] if part]
-    if caption_parts:
-        st.caption(" | ".join(caption_parts))
-
-    if not rows:
-        st.warning("⚠️ No scheduled stops returned by the provider.")
-        return
-
-    schedule_df = pd.DataFrame(rows)
-    
-    metric_cols = st.columns(3)
-    metric_cols[0].metric("Total Stops", len(schedule_df))
-    metric_cols[1].metric("Source", schedule_df.iloc[0]["Code"])
-    metric_cols[2].metric("Destination", schedule_df.iloc[-1]["Code"])
-    
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.dataframe(schedule_df, width='stretch', hide_index=True)
-    
-    render_downloads(
-        base_name=f"schedule_{params.get('train', schedule_data.get('train_number', 'train'))}",
-        payload=schedule_data,
-        frames={"Schedule": schedule_df},
-    )
-
-    if show_raw:
-        st.markdown("---")
-        st.subheader("Raw JSON Response")
-        st.json(schedule_data)
-
-
-def render_station_tab(settings: Mapping[str, Any]) -> None:
-    with st.form("station_form", clear_on_submit=False):
-        st.subheader("Search Station Codes")
-        cols = st.columns([3, 1])
-        query = cols[0].text_input("Station Name or Code", value=DEFAULT_STATION_QUERY, placeholder="e.g. Bangalore")
-        limit = int(
-            cols[1].number_input(
-                "Result Limit",
-                min_value=1,
-                max_value=250,
-                value=int(DEFAULT_STATION_LIMIT),
-            )
-        )
-        st.markdown("<br>", unsafe_allow_html=True)
-        submitted = st.form_submit_button("🚉 Search Stations", type="primary")
-
-    if submitted:
-        try:
-            station_data = load_station_cache_cached(str(settings["cache_path"]))
-            stations = search_station_local(query, station_data, limit=limit)
-            st.session_state["station_result"] = stations
-            st.session_state["station_params"] = {
-                "query": query,
-                "limit": limit,
-                "searched_at": now_label(),
-            }
-        except StationCacheError as exc:
-            st.error(f"Error: {str(exc)}")
-
-    st.divider()
-    stations = st.session_state.get("station_result")
-    params = st.session_state.get("station_params") or {}
-    
-    if stations:
-        station_df = pd.DataFrame(stations)
-        st.subheader("📊 Station Results")
-        metric_cols = st.columns(2)
-        metric_cols[0].metric("Matches Found", len(station_df))
-        metric_cols[1].metric("Search Limit applied", params.get("limit", DEFAULT_STATION_LIMIT))
-        
-        render_search_caption(params)
-        st.markdown("<br>", unsafe_allow_html=True)
-        st.dataframe(station_df, width='stretch', hide_index=True)
-        
-        render_downloads(
-            base_name=f"stations_{safe_filename(str(params.get('query', 'query')))}",
-            payload={"stations": stations, "params": params},
-            frames={"Stations": station_df},
-        )
-    elif stations == []:
-        st.warning("⚠️ No stations found matching your query.")
-    else:
-        st.info("👋 Search for a station name to find its official railway code.")
-
-
-@st.cache_data(show_spinner=False)
-def load_station_cache_cached(cache_path: str) -> list[dict[str, Any]]:
-    return load_station_cache(Path(cache_path))
-
-
-@st.cache_data(ttl=SCHEDULE_CACHE_TTL_SECONDS, show_spinner=False)
-def fetch_schedule_cached(train_number: str, timeout: int, retries: int) -> dict[str, Any]:
-    session = create_session(retries=retries)
-    return get_schedule_from_page(train_number, session=session, timeout=float(timeout))
-
-
-def route_rows_for_schedule(
-    schedule_data: Mapping[str, Any],
-    from_station: str,
-    to_station: str,
-) -> list[dict[str, Any]]:
-    route_stops = find_route_slice(
-        extract_route_stops(schedule_data),
-        from_station,
-        to_station,
-    )
-    rows = []
-    for route_index, stop in enumerate(route_stops, start=1):
-        rows.append(
-            {
-                "#": route_index,
-                "Station": stop.name,
-                "Code": stop.code,
-                "Arrival": minutes_to_clock(stop.arrival_minutes, empty_text="START"),
-                "Departure": minutes_to_clock(stop.departure_minutes, empty_text="END"),
-                "Day": stop.day,
-            }
-        )
-    return rows
-
-
-def schedule_rows(schedule_data: Mapping[str, Any]) -> list[dict[str, Any]]:
-    rows = []
-    stop_count = 1
-    for day_group in schedule_data.get("timeTableDaysGroup", []):
-        if not isinstance(day_group, Mapping):
-            continue
-        for stop in day_group.get("items", []):
-            if not isinstance(stop, Mapping) or not stop.get("stop"):
-                continue
-            rows.append(
-                {
-                    "#": stop_count,
-                    "Station": stop.get("station_name"),
-                    "Code": stop.get("station_code"),
-                    "Arrival": minutes_to_clock(stop.get("sta_min"), empty_text="START"),
-                    "Departure": minutes_to_clock(stop.get("std_min"), empty_text="END"),
-                    "Day": stop.get("day"),
-                }
-            )
-            stop_count += 1
-    return rows
-
-
-def split_summary_frame(results: Sequence[Mapping[str, Any]]) -> pd.DataFrame:
-    rows = []
-    for index, result in enumerate(results, start=1):
-        segments = result.get("segments", [])
-        status_counts = count_status_kinds(segments)
-        rows.append(
-            {
-                "#": index,
-                "Class": result.get("class"),
-                "Segments": result.get("segment_count"),
-                "Via": split_codes(result),
-                "Statuses": " | ".join(
-                    f"{segment.get('from', {}).get('code')}->{segment.get('to', {}).get('code')}: "
-                    f"{segment.get('status', 'N/A')}"
-                    for segment in segments
-                ),
-                "AVL": status_counts.get("available", 0),
-                "RAC": status_counts.get("rac", 0),
-                "WL": status_counts.get("wl", 0),
-                "Fare (₹)": sum_segment_fares(segments),
-            }
-        )
-    return pd.DataFrame(rows)
-
-
-def split_segment_frame(results: Sequence[Mapping[str, Any]]) -> pd.DataFrame:
-    rows = []
-    for index, result in enumerate(results, start=1):
-        for row in segment_rows(result.get("segments", [])):
-            row["Option"] = index
-            row["Via"] = split_codes(result)
-            rows.append(row)
-    return pd.DataFrame(rows)
-
-
-def segment_rows(segments: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    rows = []
-    for segment in segments:
-        rows.append(
-            {
-                "From": segment.get("from", {}).get("code"),
-                "From Name": segment.get("from", {}).get("name"),
-                "To": segment.get("to", {}).get("code"),
-                "To Name": segment.get("to", {}).get("name"),
-                "Date": segment.get("journey_date"),
-                "Class": segment.get("class"),
-                "Status": segment.get("status"),
-                "Kind": segment.get("kind"),
-                "Wait Qty": segment.get("count"),
-                "Fare": segment.get("fare"),
-                "Prediction": segment.get("prediction") or "",
-                "Acceptable": bool(segment.get("acceptable")),
-            }
-        )
-    return rows
-
-
-def direct_train_rows(
-    trains: Sequence[Mapping[str, Any]],
-    *,
-    class_filter: Sequence[str],
-) -> list[dict[str, Any]]:
-    selected = set(normalize_classes(class_filter))
-    rows = []
-    for train in trains:
-        availability_items = train.get("sa_data", [])
-        if not isinstance(availability_items, list):
-            availability_items = []
-
-        matched = False
-        for class_data in availability_items:
-            if not isinstance(class_data, Mapping) or not class_data.get("success"):
-                continue
-            class_code = clean_text(class_data.get("booking_class")).upper()
-            if selected and class_code not in selected:
-                continue
-
-            seat_list = class_data.get("seat_availibility") or []
-            status_info = seat_list[0] if seat_list and isinstance(seat_list[0], Mapping) else {}
-            status = status_info.get(f"Class - {class_code}") or status_info.get("availability") or "N/A"
-            parsed = parse_availability_status(status)
-            rows.append(
-                {
-                    "Train Name": train.get("train_name"),
-                    "Number": train.get("train_number"),
-                    "Depart": train.get("from_std"),
-                    "Arrive": train.get("to_sta"),
-                    "Duration": train.get("duration"),
-                    "Class": class_code,
-                    "Status": parsed.get("status"),
-                    "Kind": parsed.get("kind"),
-                    "Wait Qty": parsed.get("count"),
-                    "Fare (₹)": status_info.get("total_fare", "N/A"),
-                    "Prediction": status_info.get("prediction") or "",
-                }
-            )
-            matched = True
-
-        if not matched and not selected:
-            rows.append(
-                {
-                    "Train Name": train.get("train_name"),
-                    "Number": train.get("train_number"),
-                    "Depart": train.get("from_std"),
-                    "Arrive": train.get("to_sta"),
-                    "Duration": train.get("duration"),
-                    "Class": "N/A",
-                    "Status": "No availability data",
-                    "Kind": "unknown",
-                    "Wait Qty": None,
-                    "Fare (₹)": "N/A",
-                    "Prediction": "",
-                }
-            )
-    return rows
-
-
-def split_result_label(index: int, result: Mapping[str, Any]) -> str:
-    segments = result.get("segments", [])
-    via = split_codes(result)
-    fare = sum_segment_fares(segments)
-    statuses = ", ".join(str(segment.get("status", "N/A")) for segment in segments)
-    return (
-        f"Option {index} | Class {result.get('class', 'N/A')} | "
-        f"{result.get('segment_count', 'N/A')} Segments via {via} | "
-        f"Fare: ₹{fare} | Status: {statuses}"
-    )
-
-
-def count_status_kinds(segments: Sequence[Mapping[str, Any]]) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for segment in segments:
-        kind = str(segment.get("kind") or "unknown")
-        counts[kind] = counts.get(kind, 0) + 1
-    return counts
-
-
-def split_codes(result: Mapping[str, Any]) -> str:
-    split_stations = result.get("split_stations", [])
-    if not split_stations:
-        return "Direct"
-    return " ➝ ".join(str(station.get("code", "N/A")) for station in split_stations)
-
-
-def sum_segment_fares(segments: Sequence[Mapping[str, Any]]) -> int:
-    total = 0
-    for segment in segments:
-        try:
-            total += int(segment.get("fare"))
-        except (TypeError, ValueError):
-            continue
-    return total
-
-
-def render_search_caption(params: Mapping[str, Any]) -> None:
-    if not params:
-        return
-    visible = []
-    for key in ("train", "from", "to", "date", "classes", "quota", "provider", "searched_at"):
-        value = params.get(key)
-        if not value:
-            continue
-        if isinstance(value, list):
-            value = ", ".join(str(item) for item in value)
-        visible.append(f"**{key.replace('_', ' ').title()}**: {value}")
-    if visible:
-        st.markdown(" ".join([f"`{item}`" for item in visible]))
-
-
-def render_downloads(
-    *,
-    base_name: str,
-    payload: Mapping[str, Any],
-    frames: Mapping[str, pd.DataFrame],
-) -> None:
-    st.markdown("<br>", unsafe_allow_html=True)
-    col_count = min(4, len(frames) + 1)
-    cols = st.columns(col_count)
-    
-    cols[0].download_button(
-        "📄 Download JSON",
-        data=json_bytes(payload),
-        file_name=f"{safe_filename(base_name)}.json",
-        mime="application/json",
-        width='stretch'
-    )
-    for index, (name, frame) in enumerate(frames.items(), start=1):
-        if index >= col_count:
+import pandas as pd
+import string
+import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta
+
+# ==========================================
+# 0. BACKEND MONKEY-PATCH (Fixing Fare & Rich Data)
+# ==========================================
+# We patch the backend parsers dynamically here so you don't have to rewrite your package.
+import pysplit_inrail.railway_api as backend_api
+_original_normalize = backend_api._normalize_ixigo_fetch_availability
+
+def _patched_normalize_ixigo_fetch_availability(payload, *, journey_date, quota=None):
+    res = _original_normalize(payload, journey_date=journey_date, quota=quota)
+    if not res: return res
+
+    data = payload.get("data", {})
+
+    # 1. Fix Fare by digging into fareInfo
+    fare_info = data.get("fareInfo", {})
+    if "totalFare" in fare_info:
+        res["fare"] = fare_info["totalFare"]
+    elif "baseFare" in fare_info:
+        res["fare"] = fare_info["baseFare"]
+
+    # 2. Extract rich prediction and confirmation status from avlDayList
+    avl_list = data.get("avlDayList", [])
+    chosen_entry = None
+    for entry in avl_list:
+        # Match based on status string to find the correct day object
+        if entry.get("availablityStatus") == res.get("availability") or entry.get("availability") == res.get("availability"):
+            chosen_entry = entry
             break
-        cols[index].download_button(
-            f"📊 Download {name} CSV",
-            data=frame.to_csv(index=False).encode("utf-8"),
-            file_name=f"{safe_filename(base_name)}_{safe_filename(name)}.csv",
-            mime="text/csv",
-            width='stretch'
+
+    if not chosen_entry and avl_list:
+        chosen_entry = avl_list[0]
+
+    if chosen_entry:
+        res["predictionPercentage"] = chosen_entry.get("predictionPercentage")
+        res["confirmTktStatus"] = chosen_entry.get("confirmTktStatus")
+
+        # Override prediction text with richer data if available
+        if res.get("predictionPercentage"):
+            res["prediction"] = f"{res['predictionPercentage']}% Chance ({res['confirmTktStatus']})"
+
+    return res
+
+# Apply the patch globally
+backend_api._normalize_ixigo_fetch_availability = _patched_normalize_ixigo_fetch_availability
+
+from pysplit_inrail.railway_api import get_trains_between_stations, get_schedule_from_page, RailwayApiError
+from pysplit_inrail.split_journey import find_same_train_split_journeys, SplitJourneyError
+
+
+# ==========================================
+# 1. PAGE CONFIGURATION & CUSTOM CSS
+# ==========================================
+st.set_page_config(page_title="InRail Smart Search", page_icon="🚆", layout="wide")
+
+st.markdown("""
+<style>
+    .badge {
+        display: inline-block; padding: 0.4em 0.7em; font-size: 0.85em; font-weight: 700;
+        line-height: 1; text-align: center; white-space: nowrap; vertical-align: baseline;
+        border-radius: 0.25rem; margin-right: 5px; margin-bottom: 5px;
+    }
+    .badge-avail { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+    .badge-rac { background-color: #fff3cd; color: #856404; border: 1px solid #ffeeba; }
+    .badge-wl { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+    .badge-cancel { background-color: #f5c6cb; color: #721c24; border: 1px solid #f5c6cb; text-decoration: line-through; }
+    .badge-na { background-color: #e2e3e5; color: #383d41; border: 1px solid #d6d8db; }
+
+    .seat-card {
+        border: 1px solid #e0e0e0; border-radius: 8px; padding: 12px; margin-bottom: 10px;
+        background-color: #fdfdfd; box-shadow: 1px 1px 4px rgba(0,0,0,0.05);
+    }
+    .split-step {
+        border-left: 4px solid #4CAF50; padding-left: 15px; margin-bottom: 15px;
+    }
+    .time-badge { font-family: monospace; color: #555; font-size: 0.9em; }
+</style>
+""", unsafe_allow_html=True)
+
+
+# ==========================================
+# 2. DATA LOADERS & HELPERS
+# ==========================================
+
+@st.cache_data
+def load_all_stations():
+    """
+    Loads all stations from stations_cache.json.
+    Matches Name and Code for searchability.
+    """
+    stations = set()
+    cache_file = "stations_cache.json"
+
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file, "r") as f:
+                data = json.load(f)
+                # Handle dictionary format { "MAS": {"name": "Chennai", "code": "MAS"}, ... }
+                if isinstance(data, dict):
+                    for k, v in data.items():
+                        code = v.get('code', k).upper()
+                        name = v.get('name', k).upper()
+                        stations.add(f"{code} - {name}")
+                # Handle list format [ {"code": "MAS", "name": "Chennai"}, ... ]
+                elif isinstance(data, list):
+                    for item in data:
+                        code = str(item.get('code', '')).upper()
+                        name = str(item.get('name', '')).upper()
+                        if code and name:
+                            stations.add(f"{code} - {name}")
+        except Exception as e:
+            st.error(f"Error reading station cache: {e}")
+
+    if not stations:
+        # Emergency fallback stations
+        stations.update(["MAS - CHENNAI CENTRAL", "MYS - MYSURU JN", "SBC - KSR BENGALURU", "NDLS - NEW DELHI"])
+
+    return sorted(list(stations))
+
+
+@st.cache_data
+def load_all_trains():
+    """
+    Loads the complete Indian Railways train database from RailYatri.
+
+    Uses ThreadPoolExecutor to fetch A-Z and 0-9 from RailYatri in ~2 seconds.
+    Saves to trains_cache.json for instant subsequent loads.
+
+    Returns a lookup dictionary keyed by train_number, where each value holds
+    the full RailYatri metadata:
+        {
+            "train_number": "58719",
+            "train_name": "ABHANPUR RAJIM PASENGER",
+            "train_src": "AVP",
+            "train_dstn": "RIM",
+            "src_name": "Abhanpur Junction",
+            "dstn_name": "Rajim",
+        }
+    """
+    train_lookup = {}
+    cache_file = "trains_cache.json"
+
+    def add_record(rec):
+        """Normalizes a raw record (from API or cache, in any known shape) into
+        the lookup dict, keyed by train number."""
+        if not isinstance(rec, dict):
+            return
+        num = str(rec.get("train_number") or rec.get("trainNo") or rec.get("trainNumber") or "").strip()
+        name = str(rec.get("train_name") or rec.get("trainName") or "").strip().upper()
+        if not num or not name:
+            return
+        train_lookup[num] = {
+            "train_number": num,
+            "train_name": name,
+            "train_src": str(rec.get("train_src") or rec.get("src") or rec.get("trainSrc") or "").strip().upper(),
+            "train_dstn": str(rec.get("train_dstn") or rec.get("dstn") or rec.get("trainDstn") or "").strip().upper(),
+            "src_name": str(rec.get("src_name") or rec.get("srcName") or "").strip(),
+            "dstn_name": str(rec.get("dstn_name") or rec.get("dstnName") or "").strip(),
+        }
+
+    # 1. Try loading from local cache first
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file, "r") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    for t in data:
+                        if isinstance(t, str):
+                            # Legacy "12345 - NAME" cache format
+                            parts = t.split(" - ", 1)
+                            if len(parts) == 2:
+                                add_record({"train_number": parts[0], "train_name": parts[1]})
+                        elif isinstance(t, dict):
+                            add_record(t)
+                elif isinstance(data, dict):
+                    # Legacy "{code: {...}}" cache format, or a raw {"trains": [...]} payload
+                    if "trains" in data and isinstance(data["trains"], list):
+                        for t in data["trains"]:
+                            add_record(t)
+                    else:
+                        for k, v in data.items():
+                            if isinstance(v, dict):
+                                v = dict(v)
+                                v.setdefault("train_number", k)
+                                add_record(v)
+        except Exception:
+            pass
+
+    # 2. If cache is empty or missing, fetch dynamically from RailYatri
+    if not train_lookup:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+        }
+
+        def fetch_char_batch(char):
+            try:
+                url = f"https://www.railyatri.in/trains/sort_by_char/{char}"
+                resp = requests.get(url, headers=headers, timeout=10)
+                if resp.status_code == 200:
+                    return resp.json().get("trains", [])
+            except Exception:
+                return []
+            return []
+
+        # All characters: a-z and 0-9
+        search_chars = list(string.ascii_lowercase) + [str(i) for i in range(10)]
+
+        with st.status("Initializing Train Database (fetching ~4,000 trains)...", expanded=False) as status:
+            with ThreadPoolExecutor(max_workers=12) as executor:
+                future_to_char = {executor.submit(fetch_char_batch, c): c for c in search_chars}
+                for future in as_completed(future_to_char):
+                    results = future.result()
+                    for t in results:
+                        add_record(t)
+
+            status.update(label=f"Database Loaded! Found {len(train_lookup)} trains.", state="complete")
+
+        # 3. Save to local cache for future use (full metadata, not just "NUM - NAME")
+        if train_lookup:
+            try:
+                with open(cache_file, "w") as f:
+                    json.dump(
+                        sorted(train_lookup.values(), key=lambda r: r["train_number"]),
+                        f, indent=4
+                    )
+            except Exception:
+                pass
+
+    # 4. Fallback if everything failed
+    if not train_lookup:
+        fallback_records = [
+            {"train_number": "16021", "train_name": "KAVERI EXPRESS", "train_src": "MYS", "train_dstn": "MAS",
+             "src_name": "Mysuru Jn", "dstn_name": "Chennai Central"},
+            {"train_number": "12627", "train_name": "KARNATAKA EXPRESS", "train_src": "SBC", "train_dstn": "NDLS",
+             "src_name": "KSR Bengaluru", "dstn_name": "New Delhi"},
+            {"train_number": "12007", "train_name": "SHATABDI EXPRESS", "train_src": "MAS", "train_dstn": "MYS",
+             "src_name": "Chennai Central", "dstn_name": "Mysuru Jn"},
+        ]
+        for rec in fallback_records:
+            add_record(rec)
+
+    return train_lookup
+
+
+def build_train_display_options(train_lookup: dict) -> list:
+    """
+    Builds the sorted "suggestion" strings shown in the selectboxes, e.g.:
+        "58719 - ABHANPUR RAJIM PASENGER (AVP RIM)"
+    These are suggestions only -- the fields also accept arbitrary free text.
+
+    NOTE: the source/destination codes are joined with a plain space (not an
+    arrow/dash) on purpose. Streamlit's built-in dropdown search can fall back
+    to a strict "contains" substring match depending on version, and typing
+    e.g. "mas eknr" needs "MAS EKNR" to appear as a literal contiguous
+    substring to be found -- an arrow or dash in between would break that.
+    """
+    options = []
+    for info in train_lookup.values():
+        route = ""
+        if info.get("train_src") or info.get("train_dstn"):
+            route = f" ({info.get('train_src', '')} {info.get('train_dstn', '')})"
+        options.append(f"{info['train_number']} - {info['train_name']}{route}")
+    return sorted(options)
+
+
+def extract_code(selection: str) -> str:
+    """
+    Extracts the leading Code or Train Number from a selection.
+
+    Accepts BOTH:
+      - A suggestion picked from the dropdown, e.g. "12345 - SOME TRAIN (AVP -> RIM)"
+        or "MAS - CHENNAI CENTRAL"  -> returns "12345" / "MAS"
+      - Arbitrary free-form text typed by the user (since fields now allow
+        entries outside the suggestion list), e.g. "12345" or "mas" or a
+        train name typed directly -> returned as-is (trimmed/uppercased where
+        it looks like a bare code).
+    """
+    if not selection:
+        return ""
+    selection = str(selection).strip()
+    if not selection:
+        return ""
+    if " - " in selection:
+        return selection.split(" - ")[0].strip()
+    return selection
+
+
+def render_badge(status: str, prediction: str = None) -> str:
+    """Generates HTML for colored status badges and predictions."""
+    status_upper = str(status).upper()
+    css_class = "badge-na"
+
+    if "CANCELLED" in status_upper:
+        css_class = "badge-cancel"
+    elif "AVL" in status_upper or "AVAILABLE" in status_upper:
+        css_class = "badge-avail"
+    elif "RAC" in status_upper:
+        css_class = "badge-rac"
+    elif "WL" in status_upper:
+        css_class = "badge-wl"
+
+    html = f'<span class="badge {css_class}">{status}</span>'
+
+    # Add Prediction text if it exists
+    if prediction and str(prediction).strip() not in ["None", "", "null"]:
+        html += f'<br><small style="color: #666; font-size: 0.8em;">📈 {prediction}</small>'
+
+    return html
+
+
+def sync_train_route():
+    """
+    Callback fired whenever the Tab 1 train field changes (either by typing +
+    Enter/blur, or by picking a suggestion).
+    Auto-fills the From/To station fields from the selected train's metadata,
+    if that train number is a known one. The user can still freely edit
+    From/To afterwards, since those are plain free-text fields too.
+    """
+    selected = st.session_state.get("t1_train_input", "")
+    code = extract_code(selected)
+    info = TRAIN_LOOKUP.get(code)
+    if not info:
+        return
+    if info.get("train_src") and info.get("src_name"):
+        st.session_state["t1_from_input"] = f"{info['train_src']} - {info['src_name'].upper()}"
+    if info.get("train_dstn") and info.get("dstn_name"):
+        st.session_state["t1_to_input"] = f"{info['train_dstn']} - {info['dstn_name'].upper()}"
+
+
+def free_choice_field(label, options, key, default=None, placeholder=None, help_text=None, on_change=None):
+    """
+    A SINGLE combo box: pick a suggestion from the dropdown, or type any
+    arbitrary value. Streamlit's underlying widget only commits typed text
+    that isn't in the list when you press Enter (or Tab) while it's
+    highlighted -- clicking elsewhere without pressing Enter does not commit
+    it, since that's a limitation of the widget itself, not something we can
+    configure around. The placeholder text below reminds the user to press
+    Enter.
+
+    filter_mode="fuzzy" is requested explicitly (matches when the typed
+    characters appear in order, even with other text in between -- e.g.
+    "mas eknr" matches "...(MAS EKNR)...").
+    Streamlit versions before ~1.56 don't support this parameter, so we fall
+    back to the plain call (whatever that version's default matching is) if
+    it raises a TypeError.
+    """
+    st.session_state.setdefault(key, default)
+    kwargs = dict(
+        options=options,
+        accept_new_options=True,
+        placeholder=placeholder or "Select a suggestion, or type a value and press Enter...",
+        help=help_text,
+        key=key,
+        on_change=on_change,
+    )
+    try:
+        return st.selectbox(label, filter_mode="fuzzy", **kwargs)
+    except TypeError:
+        # Installed Streamlit version doesn't support filter_mode yet.
+        return st.selectbox(label, **kwargs)
+
+
+# Initialize the global lookups/lists for UI
+STATION_OPTIONS = load_all_stations()
+TRAIN_LOOKUP = load_all_trains()
+TRAIN_OPTIONS = build_train_display_options(TRAIN_LOOKUP)
+tomorrow = datetime.now() + timedelta(days=1)
+
+
+# ==========================================
+# 3. SIDEBAR CONFIGURATION
+# ==========================================
+with st.sidebar:
+    st.title("🚆 InRail Settings")
+    provider_pref = st.selectbox("API Provider", ["ixigo", "railyatri"])
+    timeout_pref = st.slider("HTTP Timeout (sec)", 10, 60, 20)
+    retry_pref = st.number_input("Retries", 0, 5, 2)
+    if st.button("Clear Application Cache", width='stretch'):
+        st.cache_data.clear()
+        st.success("Cache cleared!")
+
+
+# ==========================================
+# 4. MAIN APPLICATION TABS
+# ==========================================
+tab1, tab2, tab3 = st.tabs(["🧩 Smart Split Optimizer", "🚆 Direct Train Search", "🕒 Schedule & Route"])
+
+# ---------------------------------------------------------
+# TAB 1: SMART SPLIT OPTIMIZER
+# ---------------------------------------------------------
+with tab1:
+    st.header("Find Split Journeys on the Same Train")
+    st.caption("When direct tickets are waitlisted, this searches multiple combinations to find confirmed/RAC tickets on the exact same train by splitting the journey.")
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        train_sel = free_choice_field(
+            "Train (Name or Number)", TRAIN_OPTIONS, key="t1_train_input",
+            placeholder="Pick a suggestion, or type e.g. 12345 and press Enter",
+            help_text="Picking a known train from the list auto-fills From/To below. You can also type any train number/name and press Enter to use it as-is.",
+            on_change=sync_train_route,
+        )
+    with col2:
+        from_sel = free_choice_field(
+            "From Station", STATION_OPTIONS, key="t1_from_input",
+            default=STATION_OPTIONS[0] if STATION_OPTIONS else None,
+            placeholder="Pick a suggestion, or type e.g. MAS and press Enter",
+        )
+    with col3:
+        to_sel = free_choice_field(
+            "To Station", STATION_OPTIONS, key="t1_to_input",
+            default=STATION_OPTIONS[1] if len(STATION_OPTIONS) > 1 else (STATION_OPTIONS[0] if STATION_OPTIONS else None),
+            placeholder="Pick a suggestion, or type e.g. MYS and press Enter",
         )
 
+    date_input = st.date_input("Journey Date", value=tomorrow, key="t1_date")
 
-def validate_train_number(value: str) -> str:
-    train_number = clean_text(value)
-    if not train_number:
-        raise ValueError("Train number is required.")
-    if not train_number.isdigit():
-        raise ValueError("Train number must contain digits only.")
-    return train_number
+    st.markdown("##### Preferences")
+    # Openly visible preferences
+    p_col1, p_col2, p_col3, p_col4, p_col5 = st.columns(5)
+    with p_col1: classes_sel = st.multiselect("Classes", ["SL", "3A", "2A", "1A", "CC", "EC", "2S", "3E", "FC", "EA"], default=["SL", "3A"])
+    with p_col2: max_seg_sel = st.number_input("Max Segments", min_value=2, max_value=5, value=3)
+    with p_col3: max_wl_sel = st.number_input("Acceptable WL", min_value=0, max_value=100, value=20)
+    with p_col4:
+        accept_rac_sel = st.checkbox("Accept RAC", value=True)
+        search_deep_sel = st.checkbox("Search Deeper", value=False)
+    with p_col5:
+        st.write("")
+        submit_split = st.button("Optimize Splits", type="primary", width='stretch', key="t1_submit")
 
+    # Run the search and STORE the outcome in session_state -- this block only
+    # runs on the click itself, but the render block below runs on every
+    # rerun (including switching tabs), so results stay visible afterwards.
+    if submit_split:
+        if not classes_sel:
+            st.session_state["t1_error"] = "Select at least one class."
+            st.session_state["t1_result"] = None
+        elif not st.session_state.get("t1_train_input"):
+            st.session_state["t1_error"] = "Please select or enter a train."
+            st.session_state["t1_result"] = None
+        else:
+            t0 = time.time()
+            train_num = extract_code(st.session_state.get("t1_train_input"))
+            from_stn = extract_code(st.session_state.get("t1_from_input"))
+            to_stn = extract_code(st.session_state.get("t1_to_input"))
+            j_date = date_input.strftime("%d-%m-%Y")
 
-def validate_route(from_station: str, to_station: str) -> tuple[str, str]:
-    source = validate_station_code(from_station, "From")
-    destination = validate_station_code(to_station, "To")
-    if source == destination:
-        raise ValueError("From and To stations must be different.")
-    return source, destination
+            with st.spinner(f"Analyzing route combinations for {train_num}..."):
+                try:
+                    split_data = find_same_train_split_journeys(
+                        train_number=train_num, from_station=from_stn, to_station=to_stn,
+                        journey_date=j_date, provider=provider_pref, classes=",".join(classes_sel),
+                        max_segments=max_seg_sel, max_wl=max_wl_sel, accept_rac=accept_rac_sel,
+                        search_deeper=search_deep_sel, timeout=timeout_pref
+                    )
+                    st.session_state["t1_error"] = None
+                    st.session_state["t1_result"] = {
+                        "split_data": split_data,
+                        "elapsed": time.time() - t0,
+                    }
+                except Exception as e:
+                    st.session_state["t1_result"] = None
+                    st.session_state["t1_error"] = f"Error ({time.time() - t0:.2f}s): {e}"
 
+    # Render whatever is currently stored -- persists across reruns/tab switches.
+    if st.session_state.get("t1_error"):
+        st.error(st.session_state["t1_error"])
 
-def validate_station_code(value: str, label: str) -> str:
-    station_code = clean_text(value).upper()
-    if not station_code:
-        raise ValueError(f"{label} station is required.")
-    if not re.fullmatch(r"[A-Z0-9]{1,6}", station_code):
-        raise ValueError(f"{label} station must be a valid station code.")
-    return station_code
+    if st.session_state.get("t1_result"):
+        split_data = st.session_state["t1_result"]["split_data"]
+        elapsed = st.session_state["t1_result"]["elapsed"]
+        st.success(f"⏱️ Optimization completed in **{elapsed:.2f} seconds**.")
 
+        if not split_data.get("results"):
+            st.warning("No acceptable split journeys found. Try increasing Waitlist limit or enabling 'Search Deeper'.")
+        else:
+            st.info(f"Analyzed {split_data['checked_combinations']} combinations across {split_data['checked_segments']} route segments.")
 
-def normalize_classes(values: Sequence[str] | str | None) -> list[str]:
-    parsed = parse_class_list(values)
-    return [class_code for class_code in parsed if class_code]
+            for idx, res in enumerate(split_data["results"]):
+                with st.container():
+                    st.markdown(f"#### Option {idx + 1}: {res['class']} Class")
+                    total_fare = sum(seg['fare'] for seg in res['segments'] if isinstance(seg['fare'], (int, float)))
+                    st.markdown(f"**Total Fare:** ₹{total_fare} | **Splits Required:** {res['segment_count'] - 1}")
 
+                    for seg in res['segments']:
+                        badge = render_badge(seg['status'], seg.get('prediction'))
+                        fare_txt = f"₹{seg['fare']}" if str(seg['fare']) != "N/A" else "N/A"
 
-def default_classes(value: str | None) -> list[str]:
-    parsed = normalize_classes(value)
-    return [class_code for class_code in parsed if class_code in CLASS_OPTIONS]
-
-
-def parse_default_date(value: str) -> date:
-    try:
-        return datetime.strptime(value, "%d-%m-%Y").date()
-    except ValueError:
-        return date.today()
-
-
-def date_to_api(value: date) -> str:
-    if isinstance(value, datetime):
-        value = value.date()
-    return value.strftime("%d-%m-%Y")
-
-
-def minutes_to_clock(value: Any, *, empty_text: str) -> str:
-    if value in (None, ""):
-        return empty_text
-    try:
-        minutes = int(value)
-    except (TypeError, ValueError):
-        return "N/A"
-    if minutes == 0:
-        return empty_text
-    minutes %= 1440
-    return f"{minutes // 60:02d}:{minutes % 60:02d}"
-
-
-def clean_text(value: Any) -> str:
-    if value is None:
-        return ""
-    return str(value).strip()
-
-
-def safe_index(options: Sequence[str], value: str) -> int:
-    try:
-        return list(options).index(value)
-    except ValueError:
-        return 0
-
-
-def safe_filename(value: str) -> str:
-    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip())
-    cleaned = cleaned.strip("._")
-    return cleaned or "railway_export"
-
-
-def json_bytes(payload: Mapping[str, Any]) -> bytes:
-    return json.dumps(payload, indent=2, ensure_ascii=False, default=str).encode("utf-8")
+                        st.markdown(f"""
+                        <div class="split-step">
+                            <strong>{seg['from']['name']} ({seg['from']['code']}) ➔ {seg['to']['name']} ({seg['to']['code']})</strong><br>
+                            <span class="time-badge">Date: {seg['journey_date']}</span> |
+                            <span style="font-weight:600; color:#2c3e50;">Fare: {fare_txt}</span><br>
+                            <div style="margin-top: 8px;">{badge}</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    st.divider()
 
 
-def now_label() -> str:
-    return datetime.now().strftime("%d-%m-%Y %H:%M")
+# ---------------------------------------------------------
+# TAB 2: DIRECT TRAIN SEARCH
+# ---------------------------------------------------------
+with tab2:
+    st.header("Search Direct Trains & Availability")
+
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        d_from_sel = free_choice_field(
+            "From Station", STATION_OPTIONS, key="d_from",
+            default=STATION_OPTIONS[0] if STATION_OPTIONS else None,
+            placeholder="Pick a suggestion, or type e.g. MAS and press Enter",
+        )
+    with col2:
+        d_to_sel = free_choice_field(
+            "To Station", STATION_OPTIONS, key="d_to",
+            default=STATION_OPTIONS[1] if len(STATION_OPTIONS) > 1 else (STATION_OPTIONS[0] if STATION_OPTIONS else None),
+            placeholder="Pick a suggestion, or type e.g. MYS and press Enter",
+        )
+    with col3: d_date = st.date_input("Journey Date", value=tomorrow, key="d_date")
+    with col4: d_quota = st.selectbox("Quota", ["GN", "TQ", "PT", "LD", "SS", "HP", "DF"], index=0, key="d_quota")
+
+    submit_direct = st.button("Search Direct Trains", type="primary", key="d_submit")
+
+    if submit_direct:
+        t0 = time.time()
+        d_from_code = extract_code(d_from_sel)
+        d_to_code = extract_code(d_to_sel)
+        d_date_str = d_date.strftime("%d-%m-%Y")
+
+        with st.spinner(f"Fetching trains and live seat data from {d_from_code} to {d_to_code}..."):
+            try:
+                train_data = get_trains_between_stations(
+                    from_station=d_from_code, to_station=d_to_code, journey_date=d_date_str,
+                    quota=d_quota, provider=provider_pref, timeout=timeout_pref, use_fetch_availability=True
+                )
+                st.session_state["t2_error"] = None
+                st.session_state["t2_result"] = {
+                    "trains": train_data.get("train_between_stations", []),
+                    "elapsed": time.time() - t0,
+                }
+            except Exception as e:
+                st.session_state["t2_result"] = None
+                st.session_state["t2_error"] = f"Error ({time.time() - t0:.2f}s): {e}"
+
+    # Render whatever is currently stored -- persists across reruns/tab switches.
+    if st.session_state.get("t2_error"):
+        st.error(st.session_state["t2_error"])
+
+    if st.session_state.get("t2_result"):
+        trains = st.session_state["t2_result"]["trains"]
+        elapsed = st.session_state["t2_result"]["elapsed"]
+        st.success(f"⏱️ Fetched {len(trains)} trains in **{elapsed:.2f} seconds**.")
+
+        if not trains:
+            st.warning("No direct trains found for this route and date.")
+        else:
+            for t in trains:
+                # Train Header
+                with st.expander(f"🚆 {t.get('train_number')} - {t.get('train_name')} | Dep: {t.get('from_std')} ➔ Arr: {t.get('to_sta')}"):
+                    st.markdown(f"<span class='time-badge'>Duration: {t.get('duration')} Hrs</span>", unsafe_allow_html=True)
+
+                    sa_list = t.get("sa_data", [])
+                    if not sa_list:
+                        st.info("Availability data missing for this train.")
+                    else:
+                        cols = st.columns(min(len(sa_list), 4)) # Wrap if more than 4 classes
+                        for i, sa in enumerate(sa_list):
+                            col_idx = i % 4
+                            if sa.get("success"):
+                                cls = sa.get("booking_class")
+                                seat_info = sa.get("seat_availibility", [{}])[0]
+
+                                # Use our patched richer details
+                                status = seat_info.get(f"Class - {cls}", "N/A")
+                                fare = seat_info.get("total_fare", "N/A")
+                                prediction = seat_info.get("prediction", "")
+
+                                badge = render_badge(status, prediction)
+                                fare_display = f"₹{fare}" if str(fare) != "N/A" else "Fare N/A"
+
+                                with cols[col_idx]:
+                                    st.markdown(f"""
+                                    <div class="seat-card">
+                                        <h4 style="margin: 0 0 10px 0; color: #333;">{cls} Class</h4>
+                                        <div style="font-weight: 600; color: #1a73e8; margin-bottom: 10px;">{fare_display}</div>
+                                        {badge}
+                                    </div>
+                                    """, unsafe_allow_html=True)
 
 
-def inject_css() -> None:
-    st.markdown(
-        """
-        <style>
-        /* Import clean font */
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+# ---------------------------------------------------------
+# TAB 3: TRAIN SCHEDULE & ROUTE MAP
+# ---------------------------------------------------------
+with tab3:
+    st.header("Train Timetable & Route Map")
+    st.caption("Search by either Train Number or Train Name.")
 
-        html, body, [class*="css"] {
-            font-family: 'Inter', sans-serif !important;
-        }
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        sched_train_sel = free_choice_field(
+            "Search Train (Autocomplete)", TRAIN_OPTIONS, key="sched_train",
+            placeholder="Pick a suggestion, or type e.g. 12345 and press Enter",
+        )
+    with col2:
+        st.write("")
+        st.write("")
+        submit_sched = st.button("Fetch Schedule", type="primary", width='stretch', key="sched_submit")
 
-        /* Standardize Container */
-        .block-container {
-            max-width: 1200px !important;
-            padding-top: 2rem !important;
-            padding-bottom: 3rem !important;
-        }
+    if submit_sched:
+        t0 = time.time()
+        sched_train_num = extract_code(sched_train_sel)
 
-        /* Clean up standard Streamlit UI items for production */
-        #MainMenu {visibility: hidden;}
-        header {visibility: hidden;}
-        footer {visibility: hidden;}
+        if not sched_train_num:
+            st.session_state["t3_result"] = None
+            st.session_state["t3_error"] = "Please select or enter a train."
+        else:
+            with st.spinner(f"Fetching complete route for {sched_train_num}..."):
+                try:
+                    schedule_data = get_schedule_from_page(train_number=sched_train_num, timeout=timeout_pref)
 
-        /* Form Styling: Theme agnostic transparent overlay */
-        [data-testid="stForm"] {
-            border-radius: 12px !important;
-            border: 1px solid rgba(150, 150, 150, 0.2) !important;
-            padding: 1.8rem !important;
-            background-color: rgba(150, 150, 150, 0.03) !important;
-            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03) !important;
-        }
+                    route_data = []
+                    for group in schedule_data.get("timeTableDaysGroup", []):
+                        for item in group.get("items", []):
+                            if item.get("stop"):
+                                route_data.append({
+                                    "Day": item.get("day", 1),
+                                    "Station": f"{item.get('station_name')} ({item.get('station_code')})",
+                                    "Arrives": item.get("sta", "-"),
+                                    "Departs": item.get("std", "-"),
+                                    "Halt (m)": item.get("halt_time", 0),
+                                    "Distance (km)": item.get("distance", 0)
+                                })
 
-        /* Primary Call-to-action Button */
-        [data-testid="stFormSubmitButton"] button,
-        button[kind="primary"] {
-            background: linear-gradient(135deg, #0b5aa7 0%, #083d6b 100%) !important;
-            color: #ffffff !important;
-            border: none !important;
-            border-radius: 8px !important;
-            font-weight: 600 !important;
-            padding: 0.6rem 2rem !important;
-            transition: all 0.2s ease-in-out !important;
-            box-shadow: 0 2px 6px rgba(11, 90, 167, 0.3) !important;
-        }
-        
-        [data-testid="stFormSubmitButton"] button:hover,
-        button[kind="primary"]:hover {
-            background: linear-gradient(135deg, #083d6b 0%, #0b5aa7 100%) !important;
-            box-shadow: 0 4px 12px rgba(11, 90, 167, 0.4) !important;
-            transform: translateY(-1px);
-        }
+                    st.session_state["t3_error"] = None
+                    st.session_state["t3_result"] = {
+                        "train_number": schedule_data.get("train_number"),
+                        "train_name": schedule_data.get("train_name"),
+                        "route_data": route_data,
+                        "elapsed": time.time() - t0,
+                    }
+                except Exception as e:
+                    st.session_state["t3_result"] = None
+                    st.session_state["t3_error"] = f"Error ({time.time() - t0:.2f}s): {e}"
 
-        /* Metric Cards */
-        [data-testid="stMetric"] {
-            background-color: rgba(150, 150, 150, 0.05) !important;
-            border: 1px solid rgba(150, 150, 150, 0.2) !important;
-            padding: 1rem 1.2rem !important;
-            border-radius: 10px !important;
-        }
+    # Render whatever is currently stored -- persists across reruns/tab switches.
+    if st.session_state.get("t3_error"):
+        st.error(st.session_state["t3_error"])
 
-        /* Tabs Polish */
-        .stTabs [data-baseweb="tab-list"] {
-            gap: 12px;
-        }
-        .stTabs [data-baseweb="tab"] {
-            border-radius: 8px 8px 0 0;
-            padding: 0.6rem 1.2rem;
-            font-weight: 500;
-        }
-        .stTabs [aria-selected="true"] {
-            background-color: rgba(150, 150, 150, 0.1) !important;
-            font-weight: 700;
-        }
+    if st.session_state.get("t3_result"):
+        result = st.session_state["t3_result"]
+        st.success(f"⏱️ Schedule loaded in **{result['elapsed']:.2f} seconds**.")
+        st.subheader(f"🚆 {result['train_number']} - {result['train_name']}")
 
-        /* Expanders */
-        [data-testid="stExpander"] {
-            border: 1px solid rgba(150, 150, 150, 0.2) !important;
-            border-radius: 8px !important;
-            background-color: transparent !important;
-        }
-        
-        /* Fix sidebar padding */
-        [data-testid="stSidebar"] {
-            padding-top: 1rem;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-if __name__ == "__main__":
-    if _running_in_streamlit():
-        main()
+        if result["route_data"]:
+            df = pd.DataFrame(result["route_data"])
+            st.dataframe(df, width='stretch', hide_index=True)
+        else:
+            st.warning("No valid route data found in the schedule.")
