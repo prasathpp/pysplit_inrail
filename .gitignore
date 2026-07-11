@@ -46,7 +46,7 @@ venv.bak/
 .pydevproject
 .settings/
 *.code-workspace
-.agent/
+.agents/
 .claude/
 
 # Testing & Coverage

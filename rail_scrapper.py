@@ -3,21 +3,21 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from formatters import (
+from pyinrail.formatters import (
     format_split_journey_results,
     format_schedule_info,
     format_station_results,
     format_train_info,
 )
-from railway_api import (
+from pyinrail.railway_api import (
     RailwayApiError,
     SUPPORTED_TRAIN_SEARCH_PROVIDERS,
     create_session,
     get_schedule_from_page,
     get_trains_between_stations,
 )
-from split_journey import SplitJourneyError, find_same_train_split_journeys
-from stations import StationCacheError, load_station_cache, search_station_local
+from pyinrail.split_journey import SplitJourneyError, find_same_train_split_journeys
+from pyinrail.stations import StationCacheError, load_station_cache, search_station_local
 
 
 # Hardcoded inputs. Change these when you want to run without CLI arguments.

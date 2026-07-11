@@ -1,6 +1,6 @@
 import unittest
 
-from split_journey import (
+from pyinrail.split_journey import (
     extract_route_stops,
     find_same_train_split_journeys,
     generate_split_segments,

@@ -10,19 +10,21 @@ pyinrail-master/
 ├── 📄 LICENSE                      # MIT License
 ├── 📄 CHANGELOG.md                 # Version history and changes
 │
-├── 🔧 CORE MODULES
-│   ├── railway_api.py              # API wrapper for train data providers
-│   ├── split_journey.py            # Split journey search algorithm (⭐ MAIN FEATURE)
-│   ├── stations.py                 # Station cache & search utilities
-│   └── formatters.py               # Output formatting helpers
+├── � PYINRAIL PACKAGE (core library)
+│   └── pyinrail/
+│       ├── __init__.py             # Package initialization
+│       ├── railway_api.py          # API wrapper for train data providers
+│       ├── split_journey.py        # Split journey search algorithm (⭐ MAIN FEATURE)
+│       ├── stations.py             # Station cache & search utilities
+│       └── formatters.py           # Output formatting helpers
 │
-├── 🖥️ USER INTERFACES
+├── 🖥️ USER INTERFACES & UTILITIES (at root)
 │   ├── rail_scrapper.py            # Command-line interface (CLI)
-│   └── streamlit_app.py            # Web application (recommended for users)
-│
-├── 🛠️ UTILITIES & DATA
+│   ├── streamlit_app.py            # Web application (recommended for users)
 │   ├── create_station_cache.py     # Generate station database
-│   ├── create_stations_endpoint.py # API endpoint creation
+│   └── create_stations_endpoint.py # API endpoint creation
+│
+├── 📊 DATA FILES
 │   ├── stations_cache.json         # Pre-built station data (~ 2000+ stations)
 │   └── stations_endpoint.json      # Station endpoint reference
 │
@@ -47,10 +49,19 @@ pyinrail-master/
 
 ## File Descriptions
 
-### Core Modules
+### Core Modules (in `pyinrail/` package)
 
-#### `railway_api.py` (633 lines)
+#### `pyinrail.railway_api` (633 lines)
 **Purpose:** Central API wrapper for train data providers
+
+**Import:**
+```python
+from pyinrail.railway_api import (
+    create_session,
+    get_trains_between_stations,
+    get_schedule_from_page,
+)
+```
 
 **Key Components:**
 - `create_session()` - Creates HTTP session with retry logic
@@ -70,8 +81,17 @@ pyinrail-master/
 
 ---
 
-#### `split_journey.py` (611 lines) ⭐
+#### `pyinrail.split_journey` (611 lines) ⭐
 **Purpose:** Core split journey search algorithm
+
+**Import:**
+```python
+from pyinrail.split_journey import (
+    find_same_train_split_journeys,
+    extract_route_stops,
+    parse_availability_status,
+)
+```
 
 **Key Classes:**
 ```

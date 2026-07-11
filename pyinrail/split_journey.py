@@ -8,7 +8,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 import requests
 
-from railway_api import (
+from .railway_api import (
     get_ixigo_train_availability,
     get_schedule_from_page,
     get_trains_between_stations,

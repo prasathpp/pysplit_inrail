@@ -17,12 +17,15 @@ The project includes both a **command-line interface (CLI)** and an interactive 
 
 ```
 pyinrail-master/
-├── railway_api.py              # Core API wrapper for RailYatri and Ixigo
-├── split_journey.py            # Split journey search algorithm (main feature)
+├── pyinrail/                   # Core package (library modules)
+│   ├── __init__.py
+│   ├── railway_api.py          # API wrapper for RailYatri and Ixigo
+│   ├── split_journey.py        # Split journey algorithm (main feature)
+│   ├── stations.py             # Station cache management
+│   └── formatters.py           # Output formatting utilities
+│
 ├── rail_scrapper.py            # CLI interface
 ├── streamlit_app.py            # Web UI
-├── stations.py                 # Station cache management
-├── formatters.py               # Output formatting utilities
 ├── create_station_cache.py     # Generate station database cache
 ├── create_stations_endpoint.py # Create station API endpoint
 ├── stations_cache.json         # Pre-built station data cache
@@ -98,8 +101,8 @@ python rail_scrapper.py split --train 16021 --from MAS --to MYS --date 31-07-202
 #### Option 3: Use as a Python Library
 
 ```python
-from railway_api import get_trains_between_stations, create_session
-from split_journey import find_same_train_split_journeys
+from pyinrail.railway_api import get_trains_between_stations, create_session
+from pyinrail.split_journey import find_same_train_split_journeys
 
 # Create a session with retry logic
 session = create_session(retries=2)

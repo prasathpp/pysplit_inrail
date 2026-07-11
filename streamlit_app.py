@@ -58,14 +58,14 @@ from rail_scrapper import (
     DEFAULT_TO_STATION,
     DEFAULT_TRAIN_PROVIDER,
 )
-from railway_api import (
+from pyinrail.railway_api import (
     RailwayApiError,
     SUPPORTED_TRAIN_SEARCH_PROVIDERS,
     create_session,
     get_schedule_from_page,
     get_trains_between_stations,
 )
-from split_journey import (
+from pyinrail.split_journey import (
     SplitJourneyError,
     extract_route_stops,
     find_route_slice,
@@ -73,7 +73,7 @@ from split_journey import (
     parse_availability_status,
     parse_class_list,
 )
-from stations import StationCacheError, load_station_cache, search_station_local
+from pyinrail.stations import StationCacheError, load_station_cache, search_station_local
 
 
 APP_TITLE = "Rail Split Journey"

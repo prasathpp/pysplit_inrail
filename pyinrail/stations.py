@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 
-DEFAULT_STATION_CACHE = Path(__file__).with_name("stations_cache.json")
+DEFAULT_STATION_CACHE = Path(__file__).parent.parent / "stations_cache.json"
 
 
 class StationCacheError(RuntimeError):
