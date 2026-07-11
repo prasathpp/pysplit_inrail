@@ -10,7 +10,7 @@ def fetch_all_trains():
     # We will loop through a to z (and 0-9 just in case trains start with numbers)
     # string.ascii_lowercase gives 'abcdefghijklmnopqrstuvwxyz'
     # string.digits gives '0123456789'
-    characters_to_search = string.ascii_lowercase + string.digits
+    characters_to_search = string.ascii_lowercase
     
     # Adding a standard User-Agent header helps prevent requests from being blocked
     headers = {
@@ -45,13 +45,10 @@ def fetch_all_trains():
         time.sleep(1)
 
     # Build the final dictionary structure
-    final_json_structure = {
-        "total_trains_count": len(all_trains),
-        "trains": all_trains
-    }
+    final_json_structure = all_trains
 
     # Save all gathered data to a JSON file
-    output_filename = "all_trains_data.json"
+    output_filename = "trains_cache.json"
     with open(output_filename, "w", encoding="utf-8") as f:
         json.dump(final_json_structure, f, indent=4, ensure_ascii=False)
         
