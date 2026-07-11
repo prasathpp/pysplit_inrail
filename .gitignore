@@ -1,0 +1,111 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environments
+.venv/
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.env
+.venv.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.sublime-project
+*.sublime-workspace
+.project
+.pydevproject
+.settings/
+*.code-workspace
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.hypothesis/
+.benchmarks/
+
+# Streamlit
+.streamlit/
+streamlit_app/
+streamlit_logs/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# Environment-specific files
+.env.local
+.env.*.local
+
+# OS-specific
+Thumbs.db
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Editor backups
+*.bak
+*.backup
+
+# Project-specific (if needed)
+# Uncomment if you want to exclude large cache files from git
+# stations_cache.json  # Only if regeneratable
+# stations_endpoint.json  # Only if regeneratable
+
+# Railway API specific - temporary files
+api_cache/
+*.pickle
+*.pkl
+
+# Build artifacts
+*.whl
+*.tar.gz
+
+# IDE extensions
+.pylint.txt
+.mypy_cache/
+.dmypy.json
+dmypy.json
