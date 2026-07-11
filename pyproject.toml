@@ -53,10 +53,10 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/prasathpp/pyinrail-master"
-Documentation = "https://github.com/prasathpp/pyinrail-master/blob/main/README.md"
-Repository = "https://github.com/prasathpp/pyinrail-master.git"
-Issues = "https://github.com/prasathpp/pyinrail-master"
+Homepage = "https://github.com/prasathpp/pysplit_inrail"
+Documentation = "https://github.com/prasathpp/pysplit_inrail/blob/main/README.md"
+Repository = "https://github.com/prasathpp/pysplit_inrail.git"
+Issues = "https://github.com/prasathpp/pysplit_inrail"
 
 [tool.setuptools]
 packages = ["pysplit_inrail"]
